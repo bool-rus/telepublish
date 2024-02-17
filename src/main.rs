@@ -23,6 +23,7 @@ async fn main() {
         }
         if let Some(text) = msg.text() {
             let b = Bulletin {
+                id: (msg.id.0 as u64) * from_id,
                 ts: msg.date.timestamp(),
                 important: false, 
                 text: text.to_owned(),
@@ -42,6 +43,7 @@ async fn main() {
 #[derive(Serialize, Deserialize)]
 struct Bulletin {
     ts: i64,
+    id: u64,
     important: bool,
     text: String
 }
