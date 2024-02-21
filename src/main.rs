@@ -119,7 +119,7 @@ async fn process_update(
         println!("trying to store message to database");
         let mut conn = conn.lock().await;
         println!("lock received, execute...");
-        let executor = conn.executor()?;
+        let executor = conn.executor()?.retry();
 
         executor.execute(query).await?;
         println!("msg stored to db");
