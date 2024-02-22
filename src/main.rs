@@ -4,6 +4,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::sync::{Arc};
 
+use anyhow::bail;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use teloxide::dispatching::Dispatcher;
@@ -119,7 +120,14 @@ async fn process_update(
         println!("trying to store message to database");
         let mut conn = conn.lock().await;
         println!("lock received, execute...");
-        let executor = conn.executor()?.retry();
+        let executor = match conn.executor() {
+            Ok(e) => e,
+            Err(YdbError::NoSession) => {
+                conn.reconnect().await?;
+                conn.executor()?
+            },
+            Err(e) => Err(e)?
+        }.retry();
 
         executor.execute(query).await?;
         println!("msg stored to db");
