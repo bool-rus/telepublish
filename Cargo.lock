@@ -3430,9 +3430,8 @@ dependencies = [
 
 [[package]]
 name = "ydb-unofficial"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8e9374a87251cf0447e00b11a0eff7d9aec736f505f23f8954513f01600d186"
+version = "0.6.4"
+source = "git+https://github.com/bool-rus/ydb-unofficial.git?branch=bugfix/retry#5e64567994f8402b62b6f560b19f1dc289ec557e"
 dependencies = [
  "ctor",
  "futures",

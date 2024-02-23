@@ -13,7 +13,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 
-ydb-unofficial = { version = "0.6.2", features = ["sqlx", "auth-sa", "migrate"] }
+ydb-unofficial = { git = "https://github.com/bool-rus/ydb-unofficial.git", branch = "bugfix/retry", features = ["sqlx", "auth-sa", "migrate"] }
 sqlx = "0.7"
 sqlx-macros = { version = "0.7", features = ["migrate"] }
 
