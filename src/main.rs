@@ -2,9 +2,15 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
+use std::process::{exit, ExitCode};
 use std::sync::{Arc};
+use std::time::Duration;
 
 use anyhow::bail;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::{Json, Router};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use teloxide::dispatching::Dispatcher;
@@ -28,43 +34,30 @@ fn init_logger() {
 async fn main() -> anyhow::Result<()> {
     init_logger();
     let conf = Config::parse();
-
+    
     let mut conn = YdbConnectOptions::from_str(&conf.db_url)?.connect().await?;
     migrate(&mut conn).await?;
     let conn = Arc::new(Mutex::new(conn));
-
+    
+    create_server(&conf, conn.clone()).await?;
+    tokio::time::sleep(Duration::from_secs(3600)).await;
     let conf = Arc::new(conf);
-    let data = load_data()?;
-    let data = Arc::new(Mutex::new(data));
     let bot = Bot::new(conf.token.clone());
 
     let handler = dptree::entry()
         .endpoint(process_update);
     Dispatcher::builder(bot.clone(), handler)
-        .dependencies(dptree::deps![conf, data, conn])
+        .dependencies(dptree::deps![conf, conn])
         .enable_ctrlc_handler()
         .build()
         .dispatch().await;
     Ok(())
 }
 
-fn load_data() -> anyhow::Result<Data> {
-    let file = File::open("data.json")?;
-    let reader = BufReader::new(file);
-    serde_json::from_reader(reader).map_err(Into::into)
-}
-
-fn store_data(data: &Data) -> anyhow::Result<()> {
-    let file = File::create("data.json")?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer(writer, data).map_err(Into::into)
-}
-
 
 async fn process_update(
         upd: teloxide::types::Update,
         conf: Arc<Config>, 
-        data: Arc<Mutex<Data>>, 
         conn: Arc<Mutex<YdbConnection>>,
     ) -> anyhow::Result<()> {
         println!("received msg");
@@ -82,8 +75,6 @@ async fn process_update(
 
     let query = if let Some(text) = msg.text() {
         println!("msg with text: {text}");
-        let id = (msg.id.0 as u64) * from_id;
-        let mut data = data.lock().await;
         let query = query("
         declare $author as Uint64; 
         declare $id as Int32; 
@@ -95,23 +86,6 @@ async fn process_update(
             .bind(("$id", msg.id.0))
             .bind(("$ts", msg.date.timestamp() as u32))
             .bind(("$content", text.to_owned()));
-        if edit {
-            if text == "del" {
-                data.bulletins.retain(|b|b.id != id);
-            } else {
-                if let Some(b) = data.bulletins.iter_mut().find(|b|b.id == id) {
-                    b.text = text.to_owned();
-                }
-            }
-        } else {
-            data.bulletins.push_front(Bulletin {
-                id: (msg.id.0 as u64) * from_id,
-                ts: msg.date.timestamp(),
-                important: false, 
-                text: text.to_owned(),
-            });
-        }
-        store_data(&data)?;
         Some(query)
     } else {
         None
@@ -138,14 +112,12 @@ async fn process_update(
 #[derive(Serialize, Deserialize)]
 struct Bulletin {
     ts: i64,
-    id: u64,
-    important: bool,
     text: String
 }
 
 #[derive(Serialize, Deserialize)]
 struct Data {
-    bulletins: VecDeque<Bulletin>
+    bulletins: Vec<Bulletin>
 }
 
 #[derive(Parser, Debug)]
@@ -161,4 +133,43 @@ struct Config {
     db_url: String,
     #[arg(long, env="SA_KEY", default_value="none")]
     sa_key: PathBuf,
+    #[arg(long, short, default_value="127.0.0.1:3000")]
+    listen: String,
+}
+
+async fn create_server(conf: &Config, conn: Arc<Mutex<YdbConnection>>) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(&conf.listen).await?;
+    let app = Router::new().route("/bulletins", axum::routing::get(get_bulletins)).with_state(conn);
+    let handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            log::error!("Err on axum-serve: {:?}", e);
+            exit(-1);
+        };
+    });
+    Ok(())
+}
+
+async fn get_bulletins(State(conn): State<Arc<Mutex<YdbConnection>>>) -> Result<Json<Data>, AppError> {
+    let bulletins = query_as::<_, (Datetime, String)>("select ts, content from bulletins order by ts desc;")
+        .fetch_all(conn.lock().await.executor()?).await?
+        .into_iter().map(|(ts, text)|{
+            let ts: u32 = ts.into();
+            Bulletin{ts: ts as i64, text}
+        }).collect();
+    let data = Data {bulletins};
+    Ok(Json(data))
+}
+
+struct AppError(Box<dyn std::error::Error>);
+impl<E> From<E> for AppError where E: std::error::Error + 'static {
+    fn from(value: E) -> Self {
+        Self(Box::new(value))
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        let message = format!("{}", self.0);
+        (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+    }
 }
