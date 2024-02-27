@@ -40,7 +40,6 @@ async fn main() -> anyhow::Result<()> {
     let conn = Arc::new(Mutex::new(conn));
     
     create_server(&conf, conn.clone()).await?;
-    tokio::time::sleep(Duration::from_secs(3600)).await;
     let conf = Arc::new(conf);
     let bot = Bot::new(conf.token.clone());
 
@@ -71,21 +70,29 @@ async fn process_update(
     if !conf.admins.contains(&from_id) {
         return Ok(())
     }
-    println!("msg from admin");
 
     let query = if let Some(text) = msg.text() {
         println!("msg with text: {text}");
-        let query = query("
-        declare $author as Uint64; 
-        declare $id as Int32; 
-        declare $ts as Uint32; 
-        declare $content as Utf8;
-        upsert into bulletins (author, id, ts, content) values ($author, $id, cast($ts as Datetime), $content);
-        ")
+        let query = if text == "del" {
+            query("
+                declare $author as Uint64;
+                declare $id as Int32;
+                delete from bulletins where author=$author and id=$id;
+            ").bind(("$author", from_id))
+            .bind(("$id", msg.id.0))
+        } else { 
+            query("
+                declare $author as Uint64; 
+                declare $id as Int32; 
+                declare $ts as Uint32; 
+                declare $content as Utf8;
+                upsert into bulletins (author, id, ts, content) values ($author, $id, cast($ts as Datetime), $content);
+                ")
             .bind(("$author", from_id))
             .bind(("$id", msg.id.0))
             .bind(("$ts", msg.date.timestamp() as u32))
-            .bind(("$content", text.to_owned()));
+            .bind(("$content", text.to_owned()))
+        };
         Some(query)
     } else {
         None
