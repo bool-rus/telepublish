@@ -59,7 +59,6 @@ async fn process_update(
         conf: Arc<Config>, 
         conn: Arc<Mutex<YdbConnection>>,
     ) -> anyhow::Result<()> {
-        println!("received msg");
     use teloxide::types::UpdateKind::*;
     let msg = match upd.kind {
         ChannelPost(msg) | EditedChannelPost(msg) => msg,
@@ -71,7 +70,6 @@ async fn process_update(
     }
 
     let query = if let Some(text) = msg.text() {
-        println!("msg with text: {text}");
         let query = if text == "del" {
             query("
                 declare $id as Int32;
