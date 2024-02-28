@@ -14,6 +14,7 @@ use axum::{Json, Router};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use teloxide::dispatching::Dispatcher;
+use teloxide::requests::Requester;
 use teloxide::{dptree, Bot};
 use tokio::sync::Mutex;
 use ydb_unofficial::sqlx::prelude::*;
@@ -55,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
 
 async fn process_update(
+        bot: Bot,
         upd: teloxide::types::Update,
         conf: Arc<Config>, 
         conn: Arc<Mutex<YdbConnection>>,
@@ -103,6 +105,9 @@ async fn process_update(
             Err(e) => Err(e)?
         }.retry();
         executor.execute(query).await?;
+    }
+    if msg.text() == Some("del") {
+        bot.delete_message(teloxide::types::ChatId(chat_id), msg.id).await?;
     }
     Ok(())
 }
