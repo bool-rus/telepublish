@@ -61,13 +61,12 @@ async fn process_update(
     ) -> anyhow::Result<()> {
         println!("received msg");
     use teloxide::types::UpdateKind::*;
-    let (msg, edit) = match upd.kind {
-        Message(msg) | ChannelPost(msg) => (msg, false),
-        EditedMessage(msg) | EditedChannelPost(msg) => (msg, true),
+    let msg = match upd.kind {
+        ChannelPost(msg) | EditedChannelPost(msg) => msg,
         _ => return Ok(())
     };
-    let from_id = msg.from().map(|u|u.id.0).unwrap_or_default();
-    if !conf.admins.contains(&from_id) {
+    let chat_id = msg.chat.id.0;
+    if conf.channel != chat_id {
         return Ok(())
     }
 
@@ -75,20 +74,17 @@ async fn process_update(
         println!("msg with text: {text}");
         let query = if text == "del" {
             query("
-                declare $author as Uint64;
                 declare $id as Int32;
-                delete from bulletins where author=$author and id=$id;
-            ").bind(("$author", from_id))
+                delete from bulletins where id=$id;
+            ").bind(("$author", chat_id))
             .bind(("$id", msg.id.0))
         } else { 
             query("
-                declare $author as Uint64; 
                 declare $id as Int32; 
                 declare $ts as Uint32; 
                 declare $content as Utf8;
-                upsert into bulletins (author, id, ts, content) values ($author, $id, cast($ts as Datetime), $content);
+                upsert into bulletins (id, ts, content) values ($id, cast($ts as Datetime), $content);
                 ")
-            .bind(("$author", from_id))
             .bind(("$id", msg.id.0))
             .bind(("$ts", msg.date.timestamp() as u32))
             .bind(("$content", text.to_owned()))
@@ -98,27 +94,24 @@ async fn process_update(
         None
     };
     if let Some(query) = query {
-        println!("trying to store message to database");
         let mut conn = conn.lock().await;
-        println!("lock received, execute...");
         let executor = match conn.executor() {
             Ok(e) => e,
             Err(YdbError::NoSession) => {
+                log::warn!("received no session error, reconnecting...");
                 conn.reconnect().await?;
                 conn.executor()?
             },
             Err(e) => Err(e)?
         }.retry();
-
         executor.execute(query).await?;
-        println!("msg stored to db");
     }
     Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
 struct Bulletin {
-    ts: i64,
+    ts: u32,
     text: String
 }
 
@@ -133,13 +126,11 @@ struct Config {
     #[arg(long, short, env="TELEGRAM_BOT_TOKEN", hide_env_values=true)]
     token: String,
     ///comma separated ids of users who can post bulletings
-    #[arg(long, short, env="BOT_ADMINS", num_args=1.., value_delimiter=',')]
-    admins: Vec<u64>,
+    #[arg(long, short, env="CHANNEL")]
+    channel: i64,
     ///database address
     #[arg(long, env="DB_URL")]
     db_url: String,
-    #[arg(long, env="SA_KEY", default_value="none")]
-    sa_key: PathBuf,
     #[arg(long, short, default_value="127.0.0.1:3000")]
     listen: String,
 }
@@ -159,10 +150,8 @@ async fn create_server(conf: &Config, conn: Arc<Mutex<YdbConnection>>) -> anyhow
 async fn get_bulletins(State(conn): State<Arc<Mutex<YdbConnection>>>) -> Result<Json<Data>, AppError> {
     let bulletins = query_as::<_, (Datetime, String)>("select ts, content from bulletins order by ts desc;")
         .fetch_all(conn.lock().await.executor()?).await?
-        .into_iter().map(|(ts, text)|{
-            let ts: u32 = ts.into();
-            Bulletin{ts: ts as i64, text}
-        }).collect();
+        .into_iter().map(|(ts, text)|Bulletin{ts: ts.into(), text})
+        .collect();
     let data = Data {bulletins};
     Ok(Json(data))
 }
