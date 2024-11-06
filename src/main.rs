@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::{exit, ExitCode};
 use std::sync::{Arc};
 use std::time::Duration;
+use std::collections::HashMap;
 
 use anyhow::bail;
 use axum::extract::State;
@@ -150,8 +151,12 @@ async fn create_server(conf: &Config, conn: Arc<Mutex<YdbConnection>>) -> anyhow
     Ok(())
 }
 
-async fn get_bulletins(State(conn): State<Arc<Mutex<YdbConnection>>>) -> Result<Json<Data>, AppError> {
-    let bulletins = query_as::<_, (Datetime, String)>("select ts, content from bulletins order by ts desc;")
+async fn get_bulletins(State(conn): State<Arc<Mutex<YdbConnection>>>, axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>) -> Result<Json<Data>, AppError> {
+    let offset = params.get("offset").map(|v|v.parse().ok()).flatten().unwrap_or(0u32);
+    let bulletins = query_as::<_, (Datetime, String)>("
+    declare $offset as Uint32;
+    select ts, content from bulletins order by ts desc limit 10 offset $offset;
+    ").bind(("$offset", offset))
         .fetch_all(conn.lock().await.executor()?).await?
         .into_iter().map(|(ts, text)|Bulletin{ts: ts.into(), text})
         .collect();
