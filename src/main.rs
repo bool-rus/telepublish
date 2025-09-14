@@ -13,9 +13,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router};
 use clap::Parser;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use teloxide::dispatching::Dispatcher;
+use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
+use teloxide::payloads::{AnswerCallbackQuerySetters, SendMessageSetters};
 use teloxide::requests::Requester;
+use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardButtonKind, InlineKeyboardMarkup, Update};
 use teloxide::{dptree, Bot};
 use tokio::sync::Mutex;
 use ydb_unofficial::sqlx::prelude::*;
@@ -44,9 +47,14 @@ async fn main() -> anyhow::Result<()> {
     create_server(&conf, conn.clone()).await?;
     let conf = Arc::new(conf);
     let bot = Bot::new(conf.token.clone());
+    bot.send_message(ChatId(conf.channel), "Управление").reply_markup(InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("Открыть шлагбаум", "OPENSHLAG"),
+    ]])).await?;
 
     let handler = dptree::entry()
+        .branch(Update::filter_callback_query().endpoint(process_callback))
         .endpoint(process_update);
+
     Dispatcher::builder(bot.clone(), handler)
         .dependencies(dptree::deps![conf, conn])
         .enable_ctrlc_handler()
@@ -55,6 +63,26 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn process_callback(
+    bot: Bot, 
+    query: CallbackQuery,
+    conf: Arc<Config>,
+) -> anyhow::Result<()> {
+    let user = query.from;
+    let member = bot.get_chat_member(ChatId(conf.channel), user.id).await?;
+    if member.is_present() {
+        match query.data.as_ref().map(|o|o.as_str()) {
+            Some("OPENSHLAG") => {
+                openshlag().await?;
+                bot.answer_callback_query(query.id).text("Открыто").await?;
+            }
+            _=> {}
+        }
+    } else {
+        bot.answer_callback_query(query.id).text("Неа").await?;
+    }
+    Ok(())
+}
 
 async fn process_update(
         bot: Bot,
@@ -176,4 +204,10 @@ impl IntoResponse for AppError {
         let message = format!("{}", self.0);
         (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
     }
+}
+
+async fn openshlag() -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    client.post(Url::from_str("http://192.168.31.7:11181/activate/pull")?).send().await?;
+    Ok(())
 }
