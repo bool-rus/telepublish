@@ -4,7 +4,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::process::{exit, ExitCode};
 use std::sync::{Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 use anyhow::bail;
@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
     
     create_server(&conf, conn.clone()).await?;
     let conf = Arc::new(conf);
+    let services = Arc::new(Services::new(Duration::from_secs(conf.barrier_rate_limit)));
     let bot = Bot::new(conf.token.clone());
     bot.send_message(ChatId(conf.channel), "Управление").reply_markup(InlineKeyboardMarkup::new(vec![vec![
         InlineKeyboardButton::callback("Открыть шлагбаум", "OPENSHLAG"),
@@ -56,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         .endpoint(process_update);
 
     Dispatcher::builder(bot.clone(), handler)
-        .dependencies(dptree::deps![conf, conn])
+        .dependencies(dptree::deps![conf, conn, services])
         .enable_ctrlc_handler()
         .build()
         .dispatch().await;
@@ -67,14 +68,15 @@ async fn process_callback(
     bot: Bot, 
     query: CallbackQuery,
     conf: Arc<Config>,
+    services: Arc<Services>,
 ) -> anyhow::Result<()> {
     let user = query.from;
     let member = bot.get_chat_member(ChatId(conf.channel), user.id).await?;
     if member.is_present() {
         match query.data.as_ref().map(|o|o.as_str()) {
             Some("OPENSHLAG") => {
-                openshlag().await?;
-                bot.answer_callback_query(query.id).text("Открыто").await?;
+                let answer = if services.openshlag().await? { "Открыто"} else {"Уже открыто"};
+                bot.answer_callback_query(query.id).text(answer).await?;
             }
             _=> {}
         }
@@ -165,6 +167,9 @@ struct Config {
     db_url: String,
     #[arg(long, short, default_value="127.0.0.1:3000")]
     listen: String,
+    ///rate limit for barrier
+    #[arg(long="brl", default_value="25")]
+    barrier_rate_limit: u64,
 }
 
 async fn create_server(conf: &Config, conn: Arc<Mutex<YdbConnection>>) -> anyhow::Result<()> {
@@ -206,8 +211,26 @@ impl IntoResponse for AppError {
     }
 }
 
-async fn openshlag() -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
-    client.post(Url::from_str("http://192.168.31.7:11181/activate/pull")?).send().await?;
-    Ok(())
+
+struct Services {
+    tres_period: Duration,
+    shlag: Mutex<Instant>,
+}
+
+
+
+impl Services {
+    fn new(tres_period: Duration) -> Self{
+        Self { shlag: Mutex::new(Instant::now()), tres_period }
+    }
+    async fn openshlag(&self) -> anyhow::Result<bool> {
+        let mut opened = self.shlag.lock().await;
+        if opened.elapsed() < self.tres_period {
+            return Ok(false);
+        }
+        let client = reqwest::Client::new();
+        client.post(Url::from_str("http://192.168.31.7:11181/activate/pull")?).send().await?;
+        *opened = Instant::now();
+        Ok(true)
+    }
 }
