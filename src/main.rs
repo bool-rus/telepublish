@@ -4,7 +4,8 @@ use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::process::{exit, ExitCode};
 use std::sync::{Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 use anyhow::bail;
 use axum::extract::State;
@@ -12,9 +13,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router};
 use clap::Parser;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use teloxide::dispatching::Dispatcher;
+use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
+use teloxide::payloads::{AnswerCallbackQuerySetters, SendMessageSetters};
 use teloxide::requests::Requester;
+use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardButtonKind, InlineKeyboardMarkup, Update};
 use teloxide::{dptree, Bot};
 use tokio::sync::Mutex;
 use ydb_unofficial::sqlx::prelude::*;
@@ -42,18 +46,46 @@ async fn main() -> anyhow::Result<()> {
     
     create_server(&conf, conn.clone()).await?;
     let conf = Arc::new(conf);
+    let post_url = Url::from_str(&conf.button_post_url)?;
+    let services = Arc::new(Services::new(Duration::from_secs(conf.barrier_rate_limit), post_url));
     let bot = Bot::new(conf.token.clone());
+    bot.send_message(ChatId(conf.channel), "Управление").reply_markup(InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("Открыть шлагбаум", "OPENSHLAG"),
+    ]])).await?;
 
     let handler = dptree::entry()
+        .branch(Update::filter_callback_query().endpoint(process_callback))
         .endpoint(process_update);
+
     Dispatcher::builder(bot.clone(), handler)
-        .dependencies(dptree::deps![conf, conn])
+        .dependencies(dptree::deps![conf, conn, services])
         .enable_ctrlc_handler()
         .build()
         .dispatch().await;
     Ok(())
 }
 
+async fn process_callback(
+    bot: Bot, 
+    query: CallbackQuery,
+    conf: Arc<Config>,
+    services: Arc<Services>,
+) -> anyhow::Result<()> {
+    let user = query.from;
+    let member = bot.get_chat_member(ChatId(conf.channel), user.id).await?;
+    if member.is_present() {
+        match query.data.as_ref().map(|o|o.as_str()) {
+            Some("OPENSHLAG") => {
+                let answer = if services.openshlag().await? { "Открыто"} else {"Уже открыто"};
+                bot.answer_callback_query(query.id).text(answer).await?;
+            }
+            _=> {}
+        }
+    } else {
+        bot.answer_callback_query(query.id).text("Неа").await?;
+    }
+    Ok(())
+}
 
 async fn process_update(
         bot: Bot,
@@ -136,6 +168,12 @@ struct Config {
     db_url: String,
     #[arg(long, short, default_value="127.0.0.1:3000")]
     listen: String,
+    ///rate limit for barrier
+    #[arg(long="brl", default_value="25")]
+    barrier_rate_limit: u64,
+    #[arg(long, env="BUTTON_POST_URL")]
+    button_post_url: String,
+
 }
 
 async fn create_server(conf: &Config, conn: Arc<Mutex<YdbConnection>>) -> anyhow::Result<()> {
@@ -150,8 +188,12 @@ async fn create_server(conf: &Config, conn: Arc<Mutex<YdbConnection>>) -> anyhow
     Ok(())
 }
 
-async fn get_bulletins(State(conn): State<Arc<Mutex<YdbConnection>>>) -> Result<Json<Data>, AppError> {
-    let bulletins = query_as::<_, (Datetime, String)>("select ts, content from bulletins order by ts desc;")
+async fn get_bulletins(State(conn): State<Arc<Mutex<YdbConnection>>>, axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>) -> Result<Json<Data>, AppError> {
+    let offset = params.get("offset").map(|v|v.parse().ok()).flatten().unwrap_or(0u32);
+    let bulletins = query_as::<_, (Datetime, String)>("
+    declare $offset as Uint32;
+    select ts, content from bulletins order by ts desc limit 10 offset $offset;
+    ").bind(("$offset", offset))
         .fetch_all(conn.lock().await.executor()?).await?
         .into_iter().map(|(ts, text)|Bulletin{ts: ts.into(), text})
         .collect();
@@ -170,5 +212,30 @@ impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         let message = format!("{}", self.0);
         (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+    }
+}
+
+
+struct Services {
+    tres_period: Duration,
+    post_url: Url,
+    shlag: Mutex<Instant>,
+}
+
+
+
+impl Services {
+    fn new(tres_period: Duration, post_url: Url) -> Self{
+        Self { shlag: Mutex::new(Instant::now()), tres_period , post_url}
+    }
+    async fn openshlag(&self) -> anyhow::Result<bool> {
+        let mut opened = self.shlag.lock().await;
+        if opened.elapsed() < self.tres_period {
+            return Ok(false);
+        }
+        let client = reqwest::Client::new();
+        client.post(self.post_url.clone()).send().await?;
+        *opened = Instant::now();
+        Ok(true)
     }
 }
