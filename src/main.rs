@@ -46,7 +46,8 @@ async fn main() -> anyhow::Result<()> {
     
     create_server(&conf, conn.clone()).await?;
     let conf = Arc::new(conf);
-    let services = Arc::new(Services::new(Duration::from_secs(conf.barrier_rate_limit)));
+    let post_url = Url::from_str(&conf.button_post_url)?;
+    let services = Arc::new(Services::new(Duration::from_secs(conf.barrier_rate_limit), post_url));
     let bot = Bot::new(conf.token.clone());
     bot.send_message(ChatId(conf.channel), "Управление").reply_markup(InlineKeyboardMarkup::new(vec![vec![
         InlineKeyboardButton::callback("Открыть шлагбаум", "OPENSHLAG"),
@@ -170,6 +171,9 @@ struct Config {
     ///rate limit for barrier
     #[arg(long="brl", default_value="25")]
     barrier_rate_limit: u64,
+    #[arg(long, env="BUTTON_POST_URL")]
+    button_post_url: String,
+
 }
 
 async fn create_server(conf: &Config, conn: Arc<Mutex<YdbConnection>>) -> anyhow::Result<()> {
@@ -214,14 +218,15 @@ impl IntoResponse for AppError {
 
 struct Services {
     tres_period: Duration,
+    post_url: Url,
     shlag: Mutex<Instant>,
 }
 
 
 
 impl Services {
-    fn new(tres_period: Duration) -> Self{
-        Self { shlag: Mutex::new(Instant::now()), tres_period }
+    fn new(tres_period: Duration, post_url: Url) -> Self{
+        Self { shlag: Mutex::new(Instant::now()), tres_period , post_url}
     }
     async fn openshlag(&self) -> anyhow::Result<bool> {
         let mut opened = self.shlag.lock().await;
@@ -229,7 +234,7 @@ impl Services {
             return Ok(false);
         }
         let client = reqwest::Client::new();
-        client.post(Url::from_str("http://192.168.31.7:11181/activate/pull")?).send().await?;
+        client.post(self.post_url.clone()).send().await?;
         *opened = Instant::now();
         Ok(true)
     }
