@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::exit;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,13 +20,10 @@ use teloxide::requests::Requester;
 use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Update};
 use teloxide::{dptree, Bot};
 use tokio::sync::Mutex;
-use ydb_unofficial::sqlx::prelude::*;
 
-async fn migrate(conn: &mut YdbConnection) -> anyhow::Result<()> {
-    let migrator = sqlx_macros::migrate!("./migrations");
-    migrator.run_direct(conn).await?;
-    Ok(())
-}
+mod storage;
+mod sqlite_storage;
+use storage::Storage;
 
 fn init_logger() {
     use simplelog::*;
@@ -37,9 +36,12 @@ async fn main() -> anyhow::Result<()> {
     init_logger();
     let conf = Config::parse();
     
-    let mut conn = YdbConnectOptions::from_str(&conf.db_url)?.connect().await?;
-    migrate(&mut conn).await?;
-    let conn = Arc::new(Mutex::new(conn));
+    let storage: Arc<dyn Storage> = if conf.db_url.starts_with("sqlite:") {
+        Arc::new(sqlite_storage::SqliteStorage::new(&conf.db_url).await?)
+    } else {
+        Arc::new(storage::YdbStorage::new(&conf.db_url).await?)
+    };
+    storage.migrate().await?;
     
     let post_url = Url::from_str(&conf.button_post_url)?;
     let services = Arc::new(Services::new(Duration::from_secs(conf.barrier_rate_limit), post_url));
@@ -51,19 +53,21 @@ async fn main() -> anyhow::Result<()> {
         .build()?);
 
     let conf = Arc::new(conf);
-    let app_state = AppState { conn: conn.clone(), s3_client: s3_client.clone(), conf: conf.clone() };
+    let app_state = AppState { storage: storage.clone(), s3_client: s3_client.clone(), conf: conf.clone() };
     create_server(app_state).await?;
     let bot = Bot::new(conf.token.clone());
-    bot.send_message(ChatId(conf.channel), "Управление").reply_markup(InlineKeyboardMarkup::new(vec![vec![
+    if let Err(e) = bot.send_message(ChatId(conf.channel), "Управление").reply_markup(InlineKeyboardMarkup::new(vec![vec![
         InlineKeyboardButton::callback("Открыть шлагбаум", "OPENSHLAG"),
-    ]])).await?;
+    ]])).await {
+        log::warn!("Failed to send startup message: {}", e);
+    }
 
     let handler = dptree::entry()
         .branch(Update::filter_callback_query().endpoint(process_callback))
         .endpoint(process_update);
 
     Dispatcher::builder(bot.clone(), handler)
-        .dependencies(dptree::deps![conf, conn, services, s3_client])
+        .dependencies(dptree::deps![conf, storage, services, s3_client])
         .enable_ctrlc_handler()
         .build()
         .dispatch().await;
@@ -92,11 +96,17 @@ async fn process_callback(
     Ok(())
 }
 
+fn group_id(s: &str) -> i32 {
+    let mut h = DefaultHasher::default();
+    s.hash(&mut h);
+    -(h.finish() as i32).abs()
+}
+
 async fn process_update(
     bot: Bot,
     upd: Update,
     conf: Arc<Config>,
-    conn: Arc<Mutex<YdbConnection>>,
+    storage: Arc<dyn Storage>,
     s3_client: Arc<Client>,
 ) -> anyhow::Result<()> {
     use teloxide::types::UpdateKind::*;
@@ -111,25 +121,14 @@ async fn process_update(
 
     let text = msg.text().or_else(|| msg.caption());
     let is_del = text == Some("del");
-
-    let mut conn = conn.lock().await;
+    let target_id = if let Some(mg) = msg.media_group_id() {
+        group_id(&mg)
+    } else {
+        msg.id.0
+    };
 
     if is_del {
-        let photos: Vec<(i32, i32)> = {
-            let e = match conn.executor() {
-                Ok(e) => e,
-                Err(YdbError::NoSession) => {
-                    log::warn!("received no session error, reconnecting...");
-                    conn.reconnect().await?;
-                    conn.executor()?
-                },
-                Err(e) => Err(e)?
-            }.retry();
-            query_as::<_, (i32, i32)>(
-                "declare $id as Int32; select bulletin_id, sort_order from bulletin_photos where bulletin_id = $id;"
-            ).bind(("$id", msg.id.0))
-                .fetch_all(e).await?
-        };
+        let photos = storage.get_bulletin_photo_keys(target_id).await?;
 
         for (bid, sort) in &photos {
             let s3_key = format!("bulletins/{}/{}_{}.jpg", conf.channel, bid, sort);
@@ -138,93 +137,33 @@ async fn process_update(
             }
         }
 
-        {
-            let e = match conn.executor() {
-                Ok(e) => e,
-                Err(YdbError::NoSession) => {
-                    log::warn!("received no session error, reconnecting...");
-                    conn.reconnect().await?;
-                    conn.executor()?
-                },
-                Err(e) => Err(e)?
-            }.retry();
-            e.execute(
-                query("declare $id as Int32; delete from bulletin_photos where bulletin_id = $id;")
-                    .bind(("$id", msg.id.0))
-            ).await?;
-        }
-
-        {
-            let e = match conn.executor() {
-                Ok(e) => e,
-                Err(YdbError::NoSession) => {
-                    log::warn!("received no session error, reconnecting...");
-                    conn.reconnect().await?;
-                    conn.executor()?
-                },
-                Err(e) => Err(e)?
-            }.retry();
-            e.execute(
-                query("declare $id as Int32; delete from bulletins where id = $id;")
-                    .bind(("$id", msg.id.0))
-            ).await?;
-        }
-
+        storage.delete_photos_for_bulletin(target_id).await?;
+        storage.delete_bulletin(target_id).await?;
         bot.delete_message(ChatId(chat_id), msg.id).await?;
         return Ok(());
     }
 
     let content = text.unwrap_or("");
 
-    let photo_urls: Vec<String> = if let Some(photos) = msg.photo() {
+    if let Some(photos) = msg.photo() {
+        if !content.is_empty() {
+            storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
+        }
+
+        let sort = storage.get_photo_paths(target_id).await?.len() as i32;
+
         let largest = photos.last().unwrap();
         let file = bot.get_file(&largest.file.id).await?;
         let download_url = format!("https://api.telegram.org/file/bot{}/{}", conf.token, file.path);
         let bytes = reqwest::get(&download_url).await?.bytes().await?;
 
-        let s3_key = format!("bulletins/{}/{}_{}.jpg", chat_id, msg.id.0, 0);
+        let s3_key = format!("bulletins/{}/{}_{}.jpg", chat_id, target_id, sort);
         s3_client.objects().put(&conf.s3_bucket, &s3_key).body_bytes(bytes.to_vec()).content_type("image/jpeg").send().await?;
 
-        let path = format!("/photo/{}/0", msg.id.0);
-
-        {
-            let e = match conn.executor() {
-                Ok(e) => e,
-                Err(YdbError::NoSession) => {
-                    log::warn!("received no session error, reconnecting...");
-                    conn.reconnect().await?;
-                    conn.executor()?
-                },
-                Err(e) => Err(e)?
-            }.retry();
-            e.execute(
-                query("declare $bid as Int32; declare $url as Utf8; upsert into bulletin_photos (bulletin_id, url, sort_order) values ($bid, $url, 0);")
-                    .bind(("$bid", msg.id.0))
-                    .bind(("$url", path.clone()))
-            ).await?;
-        }
-
-        vec![path]
-    } else {
-        vec![]
-    };
-
-    if !photo_urls.is_empty() || !content.is_empty() {
-        let e = match conn.executor() {
-            Ok(e) => e,
-            Err(YdbError::NoSession) => {
-                log::warn!("received no session error, reconnecting...");
-                conn.reconnect().await?;
-                conn.executor()?
-            },
-            Err(e) => Err(e)?
-        }.retry();
-        e.execute(
-            query("declare $id as Int32; declare $ts as Uint32; declare $content as Utf8; upsert into bulletins (id, ts, content) values ($id, cast($ts as Datetime), $content);")
-                .bind(("$id", msg.id.0))
-                .bind(("$ts", msg.date.timestamp() as u32))
-                .bind(("$content", content.to_owned()))
-        ).await?;
+        let path = format!("/photo/{}/{}", target_id, sort);
+        storage.insert_photo(target_id, &path, sort).await?;
+    } else if !content.is_empty() {
+        storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
     }
 
     Ok(())
@@ -244,7 +183,7 @@ struct Data {
 
 #[derive(Clone)]
 struct AppState {
-    conn: Arc<Mutex<YdbConnection>>,
+    storage: Arc<dyn Storage>,
     s3_client: Arc<Client>,
     conf: Arc<Config>,
 }
@@ -283,7 +222,7 @@ async fn create_server(state: AppState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&state.conf.listen).await?;
     let app = Router::new()
         .route("/bulletins", axum::routing::get(get_bulletins))
-        .route("/photo/{bulletin_id}/{sort}", axum::routing::get(get_photo))
+        .route("/photo/:bulletin_id/:sort", axum::routing::get(get_photo))
         .with_state(state);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -296,24 +235,12 @@ async fn create_server(state: AppState) -> anyhow::Result<()> {
 
 async fn get_bulletins(State(app): State<AppState>, axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>) -> Result<Json<Data>, AppError> {
     let offset = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0u32);
-    let mut conn = app.conn.lock().await;
-
-    let rows = query_as::<_, (i32, Datetime, String)>("
-        declare $offset as Uint32;
-        select id, ts, content from bulletins order by ts desc limit 10 offset $offset;
-    ").bind(("$offset", offset))
-        .fetch_all(conn.executor()?).await?;
+    let rows = app.storage.get_bulletins(offset).await.map_err(ae)?;
 
     let mut bulletins: Vec<Bulletin> = Vec::new();
-    for (id, ts, text) in rows {
-        let photos: Vec<String> = query_as::<_, (String,)>("
-            declare $bid as Int32;
-            select url from bulletin_photos where bulletin_id = $bid order by sort_order;
-        ").bind(("$bid", id))
-            .fetch_all(conn.executor()?).await?
-            .into_iter().map(|(u,)| u).collect();
-
-        bulletins.push(Bulletin { ts: ts.into(), text, photos });
+    for row in rows {
+        let photos = app.storage.get_photo_paths(row.id).await.map_err(ae)?;
+        bulletins.push(Bulletin { ts: row.ts, text: row.content, photos });
     }
 
     Ok(Json(Data { bulletins }))
@@ -338,11 +265,15 @@ async fn get_photo(
     Ok(response)
 }
 
-struct AppError(Box<dyn std::error::Error>);
-impl<E> From<E> for AppError where E: std::error::Error + 'static {
+struct AppError(Box<dyn std::error::Error + Send + Sync>);
+impl<E> From<E> for AppError where E: std::error::Error + Send + Sync + 'static {
     fn from(value: E) -> Self {
         Self(Box::new(value))
     }
+}
+
+fn ae(e: anyhow::Error) -> AppError {
+    AppError(e.into())
 }
 
 impl IntoResponse for AppError {
