@@ -124,17 +124,6 @@ impl Storage for SqliteStorage {
         Ok(rows.into_iter().map(|(url, file_name, mime_type)| FileInfo { url, file_name, mime_type }).collect())
     }
 
-    async fn get_attachment_count(&self, bulletin_id: i32) -> anyhow::Result<i32> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM attachments WHERE bulletin_id = ?"
-        )
-        .bind(bulletin_id)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(row.0 as i32)
-    }
-
     async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>> {
         let rows = sqlx::query_as::<_, (i32, i32, Option<String>)>(
             "SELECT bulletin_id, sort_order, file_name FROM attachments WHERE bulletin_id = ?"

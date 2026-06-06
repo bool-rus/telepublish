@@ -166,7 +166,7 @@ async fn process_update(
             storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
         }
 
-        let sort = storage.get_attachment_count(target_id).await?;
+        let sort = msg.id.0;
 
         let largest = photos.last().unwrap();
         let file = bot.get_file(&largest.file.id).await?;
@@ -179,13 +179,22 @@ async fn process_update(
         let path = format!("/photo/{}/{}", target_id, sort);
         storage.insert_photo(target_id, &path, sort).await?;
     } else if let Some(doc) = msg.document() {
-        let file_target = reply_target.unwrap_or(target_id);
+        let file_target = match msg.reply_to_message() {
+            Some(reply) => {
+                if let Some(mg) = reply.media_group_id() {
+                    group_id(mg)
+                } else {
+                    reply.id.0
+                }
+            }
+            None => target_id,
+        };
 
         if reply_target.is_none() && !content.is_empty() {
             storage.upsert_bulletin(file_target, msg.date.timestamp() as u32, content).await?;
         }
 
-        let sort = storage.get_attachment_count(file_target).await?;
+        let sort = msg.id.0;
 
         let file = bot.get_file(&doc.file.id).await?;
         let download_url = format!("https://api.telegram.org/file/bot{}/{}", conf.token, file.path);

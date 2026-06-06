@@ -27,7 +27,6 @@ pub trait Storage: Send + Sync {
     async fn insert_file(&self, bulletin_id: i32, url: &str, sort_order: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()>;
     async fn get_photo_paths(&self, bulletin_id: i32) -> anyhow::Result<Vec<String>>;
     async fn get_file_info(&self, bulletin_id: i32) -> anyhow::Result<Vec<FileInfo>>;
-    async fn get_attachment_count(&self, bulletin_id: i32) -> anyhow::Result<i32>;
     async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>>;
     async fn delete_attachments_for_bulletin(&self, bulletin_id: i32) -> anyhow::Result<()>;
 }
@@ -155,17 +154,6 @@ impl Storage for YdbStorage {
             .fetch_all(executor!(&mut conn)).await?;
 
         Ok(rows.into_iter().map(|(url, file_name, mime_type)| FileInfo { url, file_name, mime_type }).collect())
-    }
-
-    async fn get_attachment_count(&self, bulletin_id: i32) -> anyhow::Result<i32> {
-        let mut conn = self.conn.lock().await;
-        let rows = query_as::<_, (i64,)>("
-            declare $bid as Int32;
-            select count(*) from attachments where bulletin_id = $bid;
-        ").bind(("$bid", bulletin_id))
-            .fetch_all(executor!(&mut conn)).await?;
-
-        Ok(rows.first().map(|(c,)| *c as i32).unwrap_or(0))
     }
 
     async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>> {
