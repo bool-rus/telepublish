@@ -151,6 +151,11 @@ async fn process_update(
             if let Err(e) = s3_client.objects().delete(&conf.s3_bucket, &s3_key).send().await {
                 log::warn!("failed to delete s3 object {}: {:?}", s3_key, e);
             }
+            bot.delete_message(ChatId(chat_id), teloxide::types::MessageId(*sort)).await.ok();
+        }
+
+        if keys.is_empty() {
+            bot.delete_message(ChatId(chat_id), teloxide::types::MessageId(del_id)).await.ok();
         }
 
         storage.delete_attachments_for_bulletin(del_id).await?;
