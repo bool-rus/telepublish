@@ -81,6 +81,23 @@
     margin-top: 8px;
     transition: background .15s;
   }
+  .card-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 12px;
+  }
+  .file-link {
+    display: inline-block;
+    padding: 8px 12px;
+    font-size: 14px;
+    color: #1a73e8;
+    background: #f0f6ff;
+    border-radius: 6px;
+    text-decoration: none;
+    word-break: break-all;
+  }
+  .file-link:hover { background: #e3edff; }
   .load-more:hover { background: #f0f0f0; }
   .load-more:disabled { opacity: .5; cursor: default; }
   .empty {
@@ -166,6 +183,20 @@ async function loadMore() {
           photos.appendChild(img);
         }
         card.appendChild(photos);
+      }
+
+      if (b.files && b.files.length > 0) {
+        const files = document.createElement('div');
+        files.className = 'card-files';
+        for (const f of b.files) {
+          const a = document.createElement('a');
+          a.href = f.url;
+          a.className = 'file-link';
+          a.textContent = '\u{1F4C4} ' + f.name;
+          a.target = '_blank';
+          files.appendChild(a);
+        }
+        card.appendChild(files);
       }
 
       feed.appendChild(card);

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::Path as FilePath;
 use std::process::exit;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -121,6 +122,7 @@ async fn process_update(
 
     let text = msg.text().or_else(|| msg.caption());
     let is_del = text == Some("del");
+    let reply_target = msg.reply_to_message().map(|r| r.id.0);
     let target_id = if let Some(mg) = msg.media_group_id() {
         group_id(&mg)
     } else {
@@ -128,17 +130,31 @@ async fn process_update(
     };
 
     if is_del {
-        let photos = storage.get_bulletin_photo_keys(target_id).await?;
+        let del_id = match msg.reply_to_message() {
+            Some(reply) => {
+                if let Some(mg) = reply.media_group_id() {
+                    group_id(mg)
+                } else {
+                    reply.id.0
+                }
+            }
+            None => target_id,
+        };
+        let keys = storage.get_attachment_keys(del_id).await?;
 
-        for (bid, sort) in &photos {
-            let s3_key = format!("bulletins/{}/{}_{}.jpg", conf.channel, bid, sort);
+        for (bid, sort, file_name) in &keys {
+            let ext = file_name.as_deref()
+                .and_then(|n| FilePath::new(n).extension())
+                .and_then(|e| e.to_str())
+                .unwrap_or("jpg");
+            let s3_key = format!("bulletins/{}/{}_{}.{}", conf.channel, bid, sort, ext);
             if let Err(e) = s3_client.objects().delete(&conf.s3_bucket, &s3_key).send().await {
                 log::warn!("failed to delete s3 object {}: {:?}", s3_key, e);
             }
         }
 
-        storage.delete_photos_for_bulletin(target_id).await?;
-        storage.delete_bulletin(target_id).await?;
+        storage.delete_attachments_for_bulletin(del_id).await?;
+        storage.delete_bulletin(del_id).await?;
         bot.delete_message(ChatId(chat_id), msg.id).await?;
         return Ok(());
     }
@@ -150,7 +166,7 @@ async fn process_update(
             storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
         }
 
-        let sort = storage.get_photo_paths(target_id).await?.len() as i32;
+        let sort = storage.get_attachment_count(target_id).await?;
 
         let largest = photos.last().unwrap();
         let file = bot.get_file(&largest.file.id).await?;
@@ -162,6 +178,28 @@ async fn process_update(
 
         let path = format!("/photo/{}/{}", target_id, sort);
         storage.insert_photo(target_id, &path, sort).await?;
+    } else if let Some(doc) = msg.document() {
+        let file_target = reply_target.unwrap_or(target_id);
+
+        if reply_target.is_none() && !content.is_empty() {
+            storage.upsert_bulletin(file_target, msg.date.timestamp() as u32, content).await?;
+        }
+
+        let sort = storage.get_attachment_count(file_target).await?;
+
+        let file = bot.get_file(&doc.file.id).await?;
+        let download_url = format!("https://api.telegram.org/file/bot{}/{}", conf.token, file.path);
+        let bytes = reqwest::get(&download_url).await?.bytes().await?;
+
+        let file_name = doc.file_name.as_deref().unwrap_or("file");
+        let mime = doc.mime_type.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "application/octet-stream".to_string());
+        let ext = FilePath::new(file_name).extension().and_then(|e| e.to_str()).unwrap_or("bin");
+
+        let s3_key = format!("bulletins/{}/{}_{}.{}", chat_id, file_target, sort, ext);
+        s3_client.objects().put(&conf.s3_bucket, &s3_key).body_bytes(bytes.to_vec()).content_type(&mime).send().await?;
+
+        let path = format!("/file/{}/{}", file_target, sort);
+        storage.insert_file(file_target, &path, sort, file_name, &mime).await?;
     } else if !content.is_empty() {
         storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
     }
@@ -174,6 +212,14 @@ struct Bulletin {
     ts: u32,
     text: String,
     photos: Vec<String>,
+    files: Vec<FileAttachment>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FileAttachment {
+    url: String,
+    name: String,
+    mime: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -223,6 +269,7 @@ async fn create_server(state: AppState) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/bulletins", axum::routing::get(get_bulletins))
         .route("/photo/:bulletin_id/:sort", axum::routing::get(get_photo))
+        .route("/file/:bulletin_id/:sort", axum::routing::get(get_file))
         .with_state(state);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -240,7 +287,9 @@ async fn get_bulletins(State(app): State<AppState>, axum::extract::Query(params)
     let mut bulletins: Vec<Bulletin> = Vec::new();
     for row in rows {
         let photos = app.storage.get_photo_paths(row.id).await.map_err(ae)?;
-        bulletins.push(Bulletin { ts: row.ts, text: row.content, photos });
+        let files = app.storage.get_file_info(row.id).await.map_err(ae)?
+            .into_iter().map(|f| FileAttachment { url: f.url, name: f.file_name, mime: f.mime_type }).collect();
+        bulletins.push(Bulletin { ts: row.ts, text: row.content, photos, files });
     }
 
     Ok(Json(Data { bulletins }))
@@ -260,6 +309,34 @@ async fn get_photo(
     let response = Response::builder()
         .header("Cache-Control", "public, max-age=86400")
         .header("Content-Type", "image/jpeg")
+        .body(axum::body::Body::from(buf))
+        .unwrap();
+    Ok(response)
+}
+
+async fn get_file(
+    State(app): State<AppState>,
+    Path((id, sort)): Path<(i32, i32)>,
+) -> Result<Response, AppError> {
+    let info = app.storage.get_file_info(id).await.map_err(ae)?;
+    let file_info = info.iter().find(|f| f.url == format!("/file/{}/{}", id, sort))
+        .ok_or_else(|| ae(anyhow::anyhow!("file not found")))?;
+
+    let file_name = FilePath::new(&file_info.file_name);
+    let ext = file_name.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+    let s3_key = format!("bulletins/{}/{}_{}.{}", app.conf.channel, id, sort, ext);
+
+    let obj = app.s3_client.objects().get(&app.conf.s3_bucket, &s3_key).send().await?;
+    let mut buf = Vec::new();
+    let mut stream = obj.body;
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(&chunk?);
+    }
+
+    let response = Response::builder()
+        .header("Cache-Control", "public, max-age=86400")
+        .header("Content-Type", &file_info.mime_type)
+        .header("Content-Disposition", format!("inline; filename=\"{}\"", file_info.file_name))
         .body(axum::body::Body::from(buf))
         .unwrap();
     Ok(response)

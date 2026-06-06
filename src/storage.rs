@@ -11,6 +11,12 @@ pub struct BulletinRow {
     pub content: String,
 }
 
+pub struct FileInfo {
+    pub url: String,
+    pub file_name: String,
+    pub mime_type: String,
+}
+
 #[async_trait]
 pub trait Storage: Send + Sync {
     async fn migrate(&self) -> anyhow::Result<()>;
@@ -18,9 +24,12 @@ pub trait Storage: Send + Sync {
     async fn delete_bulletin(&self, id: i32) -> anyhow::Result<()>;
     async fn get_bulletins(&self, offset: u32) -> anyhow::Result<Vec<BulletinRow>>;
     async fn insert_photo(&self, bulletin_id: i32, url: &str, sort_order: i32) -> anyhow::Result<()>;
+    async fn insert_file(&self, bulletin_id: i32, url: &str, sort_order: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()>;
     async fn get_photo_paths(&self, bulletin_id: i32) -> anyhow::Result<Vec<String>>;
-    async fn get_bulletin_photo_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32)>>;
-    async fn delete_photos_for_bulletin(&self, bulletin_id: i32) -> anyhow::Result<()>;
+    async fn get_file_info(&self, bulletin_id: i32) -> anyhow::Result<Vec<FileInfo>>;
+    async fn get_attachment_count(&self, bulletin_id: i32) -> anyhow::Result<i32>;
+    async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>>;
+    async fn delete_attachments_for_bulletin(&self, bulletin_id: i32) -> anyhow::Result<()>;
 }
 
 pub struct YdbStorage {
@@ -104,10 +113,24 @@ impl Storage for YdbStorage {
         let mut conn = self.conn.lock().await;
         executor!(&mut conn).
             execute(
-                query("declare $bid as Int32; declare $url as Utf8; declare $sort as Int32; upsert into bulletin_photos (bulletin_id, url, sort_order) values ($bid, $url, $sort);")
+                query("declare $bid as Int32; declare $url as Utf8; declare $sort as Int32; upsert into attachments (bulletin_id, url, sort_order, file_name, mime_type) values ($bid, $url, $sort, Null, 'image/jpeg');")
                     .bind(("$bid", bulletin_id))
                     .bind(("$url", url.to_owned()))
                     .bind(("$sort", sort_order))
+            ).await?;
+        Ok(())
+    }
+
+    async fn insert_file(&self, bulletin_id: i32, url: &str, sort_order: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().await;
+        executor!(&mut conn).
+            execute(
+                query("declare $bid as Int32; declare $url as Utf8; declare $sort as Int32; declare $name as Utf8; declare $mime as Utf8; upsert into attachments (bulletin_id, url, sort_order, file_name, mime_type) values ($bid, $url, $sort, $name, $mime);")
+                    .bind(("$bid", bulletin_id))
+                    .bind(("$url", url.to_owned()))
+                    .bind(("$sort", sort_order))
+                    .bind(("$name", file_name.to_owned()))
+                    .bind(("$mime", mime_type.to_owned()))
             ).await?;
         Ok(())
     }
@@ -116,29 +139,51 @@ impl Storage for YdbStorage {
         let mut conn = self.conn.lock().await;
         let rows = query_as::<_, (String,)>("
             declare $bid as Int32;
-            select url from bulletin_photos where bulletin_id = $bid order by sort_order;
+            select url from attachments where bulletin_id = $bid and url like '/photo/%' order by sort_order;
         ").bind(("$bid", bulletin_id))
             .fetch_all(executor!(&mut conn)).await?;
 
         Ok(rows.into_iter().map(|(u,)| u).collect())
     }
 
-    async fn get_bulletin_photo_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32)>> {
+    async fn get_file_info(&self, bulletin_id: i32) -> anyhow::Result<Vec<FileInfo>> {
         let mut conn = self.conn.lock().await;
-        let rows = query_as::<_, (i32, i32)>("
+        let rows = query_as::<_, (String, String, String)>("
+            declare $bid as Int32;
+            select url, file_name, mime_type from attachments where bulletin_id = $bid and file_name is not null order by sort_order;
+        ").bind(("$bid", bulletin_id))
+            .fetch_all(executor!(&mut conn)).await?;
+
+        Ok(rows.into_iter().map(|(url, file_name, mime_type)| FileInfo { url, file_name, mime_type }).collect())
+    }
+
+    async fn get_attachment_count(&self, bulletin_id: i32) -> anyhow::Result<i32> {
+        let mut conn = self.conn.lock().await;
+        let rows = query_as::<_, (i64,)>("
+            declare $bid as Int32;
+            select count(*) from attachments where bulletin_id = $bid;
+        ").bind(("$bid", bulletin_id))
+            .fetch_all(executor!(&mut conn)).await?;
+
+        Ok(rows.first().map(|(c,)| *c as i32).unwrap_or(0))
+    }
+
+    async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>> {
+        let mut conn = self.conn.lock().await;
+        let rows = query_as::<_, (i32, i32, Option<String>)>("
             declare $id as Int32;
-            select bulletin_id, sort_order from bulletin_photos where bulletin_id = $id;
+            select bulletin_id, sort_order, file_name from attachments where bulletin_id = $id;
         ").bind(("$id", bulletin_id))
             .fetch_all(executor!(&mut conn)).await?;
 
         Ok(rows)
     }
 
-    async fn delete_photos_for_bulletin(&self, bulletin_id: i32) -> anyhow::Result<()> {
+    async fn delete_attachments_for_bulletin(&self, bulletin_id: i32) -> anyhow::Result<()> {
         let mut conn = self.conn.lock().await;
         executor!(&mut conn).
             execute(
-                query("declare $id as Int32; delete from bulletin_photos where bulletin_id = $id;")
+                query("declare $id as Int32; delete from attachments where bulletin_id = $id;")
                     .bind(("$id", bulletin_id))
             ).await?;
         Ok(())
