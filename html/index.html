@@ -67,20 +67,7 @@
     max-height: 90vh;
     object-fit: contain;
   }
-  .load-more {
-    display: block;
-    width: 100%;
-    padding: 12px;
-    font-size: 15px;
-    font-weight: 500;
-    color: #555;
-    background: #fff;
-    border: 1px solid #ddd;
-    border-radius: 10px;
-    cursor: pointer;
-    margin-top: 8px;
-    transition: background .15s;
-  }
+  #sentinel { height: 1px; }
   .card-files {
     display: flex;
     flex-direction: column;
@@ -98,8 +85,6 @@
     word-break: break-all;
   }
   .file-link:hover { background: #e3edff; }
-  .load-more:hover { background: #f0f0f0; }
-  .load-more:disabled { opacity: .5; cursor: default; }
   .empty {
     text-align: center;
     color: #999;
@@ -124,7 +109,7 @@
 <div class="container">
   <h1>Объявления</h1>
   <div id="feed"></div>
-  <button class="load-more" id="loadMore" onclick="loadMore()">Показать ещё</button>
+  <div id="sentinel"></div>
 </div>
 <div id="lightbox" onclick="closeLightbox()"><img id="lightbox-img"></div>
 <script>
@@ -136,7 +121,6 @@ let hasMore = true;
 async function loadMore() {
   if (loading || !hasMore) return;
   loading = true;
-  document.getElementById('loadMore').disabled = true;
 
   try {
     const res = await fetch('/bulletins?offset=' + offset);
@@ -171,20 +155,6 @@ async function loadMore() {
         card.appendChild(text);
       }
 
-      if (b.photos && b.photos.length > 0) {
-        const photos = document.createElement('div');
-        photos.className = 'card-photos';
-        for (const p of b.photos) {
-          const img = document.createElement('img');
-          img.src = p;
-          img.alt = '';
-          img.loading = 'lazy';
-          img.onclick = (e) => { e.stopPropagation(); openLightbox(p); };
-          photos.appendChild(img);
-        }
-        card.appendChild(photos);
-      }
-
       if (b.files && b.files.length > 0) {
         const files = document.createElement('div');
         files.className = 'card-files';
@@ -199,12 +169,27 @@ async function loadMore() {
         card.appendChild(files);
       }
 
+      if (b.photos && b.photos.length > 0) {
+        const photos = document.createElement('div');
+        photos.className = 'card-photos';
+        for (const p of b.photos) {
+          const img = document.createElement('img');
+          img.src = p;
+          img.alt = '';
+          img.loading = 'lazy';
+          img.onclick = (e) => { e.stopPropagation(); openLightbox(p); };
+          photos.appendChild(img);
+        }
+        card.appendChild(photos);
+      }
+
       feed.appendChild(card);
       offset++;
     }
 
     if (data.bulletins.length < limit) {
       hasMore = false;
+      observer.disconnect();
     }
   } catch (e) {
     const feed = document.getElementById('feed');
@@ -213,10 +198,15 @@ async function loadMore() {
     }
   } finally {
     loading = false;
-    document.getElementById('loadMore').disabled = !hasMore;
-    document.getElementById('loadMore').style.display = hasMore ? 'block' : 'none';
   }
 }
+
+const sentinel = document.getElementById('sentinel');
+const observer = new IntersectionObserver((entries) => {
+  if (entries[0].isIntersecting && hasMore && !loading) loadMore();
+});
+observer.observe(sentinel);
+loadMore();
 
 function formatDate(ts) {
   const d = new Date(ts * 1000);
@@ -233,8 +223,6 @@ function openLightbox(src) {
 function closeLightbox() {
   document.getElementById('lightbox').style.display = 'none';
 }
-
-loadMore();
 </script>
 </body>
 </html>
