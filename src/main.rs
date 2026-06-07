@@ -121,7 +121,7 @@ async fn process_update(
     }
 
     let text = msg.text().or_else(|| msg.caption());
-    let is_del = text == Some("del");
+    let is_del = text.map(|t| t.eq_ignore_ascii_case("del")).unwrap_or(false);
     let reply_target = msg.reply_to_message().map(|r| r.id.0);
     let target_id = if let Some(mg) = msg.media_group_id() {
         group_id(&mg)
