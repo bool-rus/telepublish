@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS bulletins (
+    id INTEGER PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    content TEXT NOT NULL DEFAULT ''
+);
