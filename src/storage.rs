@@ -23,8 +23,8 @@ pub trait Storage: Send + Sync {
     async fn upsert_bulletin(&self, id: i32, ts: u32, content: &str) -> anyhow::Result<()>;
     async fn delete_bulletin(&self, id: i32) -> anyhow::Result<()>;
     async fn get_bulletins(&self, offset: u32) -> anyhow::Result<Vec<BulletinRow>>;
-    async fn insert_photo(&self, bulletin_id: i32, url: &str, sort_order: i32) -> anyhow::Result<()>;
-    async fn insert_file(&self, bulletin_id: i32, url: &str, sort_order: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()>;
+    async fn insert_photo(&self, bulletin_id: i32, url: &str, msg_id: i32) -> anyhow::Result<()>;
+    async fn insert_file(&self, bulletin_id: i32, url: &str, msg_id: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()>;
     async fn get_photo_paths(&self, bulletin_id: i32) -> anyhow::Result<Vec<String>>;
     async fn get_file_info(&self, bulletin_id: i32) -> anyhow::Result<Vec<FileInfo>>;
     async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>>;
@@ -66,7 +66,7 @@ fn into_ts(dt: Datetime) -> u32 {
 impl Storage for YdbStorage {
     async fn migrate(&self) -> anyhow::Result<()> {
         let mut conn = self.conn.lock().await;
-        let migrator = sqlx_macros::migrate!("./migrations");
+        let migrator = sqlx_macros::migrate!("./migrations/ydb");
         migrator.run_direct(&mut *conn).await?;
         Ok(())
     }
@@ -108,26 +108,26 @@ impl Storage for YdbStorage {
         }).collect())
     }
 
-    async fn insert_photo(&self, bulletin_id: i32, url: &str, sort_order: i32) -> anyhow::Result<()> {
+    async fn insert_photo(&self, bulletin_id: i32, url: &str, msg_id: i32) -> anyhow::Result<()> {
         let mut conn = self.conn.lock().await;
         executor!(&mut conn).
             execute(
-                query("declare $bid as Int32; declare $url as Utf8; declare $sort as Int32; upsert into attachments (bulletin_id, url, sort_order, file_name, mime_type) values ($bid, $url, $sort, Null, 'image/jpeg');")
+                query("declare $bid as Int32; declare $url as Utf8; declare $msg_id as Int32; upsert into attachments (bulletin_id, url, msg_id, file_name, mime_type) values ($bid, $url, $msg_id, Null, 'image/jpeg');")
                     .bind(("$bid", bulletin_id))
                     .bind(("$url", url.to_owned()))
-                    .bind(("$sort", sort_order))
+                    .bind(("$msg_id", msg_id))
             ).await?;
         Ok(())
     }
 
-    async fn insert_file(&self, bulletin_id: i32, url: &str, sort_order: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()> {
+    async fn insert_file(&self, bulletin_id: i32, url: &str, msg_id: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()> {
         let mut conn = self.conn.lock().await;
         executor!(&mut conn).
             execute(
-                query("declare $bid as Int32; declare $url as Utf8; declare $sort as Int32; declare $name as Utf8; declare $mime as Utf8; upsert into attachments (bulletin_id, url, sort_order, file_name, mime_type) values ($bid, $url, $sort, $name, $mime);")
+                query("declare $bid as Int32; declare $url as Utf8; declare $msg_id as Int32; declare $name as Utf8; declare $mime as Utf8; upsert into attachments (bulletin_id, url, msg_id, file_name, mime_type) values ($bid, $url, $msg_id, $name, $mime);")
                     .bind(("$bid", bulletin_id))
                     .bind(("$url", url.to_owned()))
-                    .bind(("$sort", sort_order))
+                    .bind(("$msg_id", msg_id))
                     .bind(("$name", file_name.to_owned()))
                     .bind(("$mime", mime_type.to_owned()))
             ).await?;
@@ -138,7 +138,7 @@ impl Storage for YdbStorage {
         let mut conn = self.conn.lock().await;
         let rows = query_as::<_, (String,)>("
             declare $bid as Int32;
-            select url from attachments where bulletin_id = $bid and url like '/photo/%' order by sort_order;
+            select url from attachments where bulletin_id = $bid and url like '/photo/%' order by msg_id;
         ").bind(("$bid", bulletin_id))
             .fetch_all(executor!(&mut conn)).await?;
 
@@ -149,7 +149,7 @@ impl Storage for YdbStorage {
         let mut conn = self.conn.lock().await;
         let rows = query_as::<_, (String, String, String)>("
             declare $bid as Int32;
-            select url, file_name, mime_type from attachments where bulletin_id = $bid and file_name is not null order by sort_order;
+            select url, file_name, mime_type from attachments where bulletin_id = $bid and file_name is not null order by msg_id;
         ").bind(("$bid", bulletin_id))
             .fetch_all(executor!(&mut conn)).await?;
 
@@ -160,7 +160,7 @@ impl Storage for YdbStorage {
         let mut conn = self.conn.lock().await;
         let rows = query_as::<_, (i32, i32, Option<String>)>("
             declare $id as Int32;
-            select bulletin_id, sort_order, file_name from attachments where bulletin_id = $id;
+            select bulletin_id, msg_id, file_name from attachments where bulletin_id = $id;
         ").bind(("$id", bulletin_id))
             .fetch_all(executor!(&mut conn)).await?;
 
