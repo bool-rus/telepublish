@@ -43,18 +43,43 @@ impl Storage for SqliteStorage {
     }
 
     async fn get_bulletins(&self, offset: u32) -> anyhow::Result<Vec<BulletinRow>> {
-        let rows = sqlx::query_as::<_, (i32, i64, String)>(
-            "SELECT id, ts, content FROM bulletins ORDER BY ts DESC LIMIT 10 OFFSET ?"
+        let rows = sqlx::query_as::<_, (i32, i64, String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT b.id, b.ts, b.content, a.url, a.file_name, a.mime_type
+             FROM bulletins b LEFT JOIN attachments a ON b.id = a.bulletin_id
+             ORDER BY b.ts DESC, a.msg_id ASC LIMIT 10 OFFSET ?"
         )
         .bind(offset as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|(id, ts, content)| BulletinRow {
-            id,
-            ts: ts as u32,
-            content,
-        }).collect())
+        let mut result: Vec<BulletinRow> = Vec::new();
+        let mut current: Option<(i32, u32, String)> = None;
+        let mut photos: Vec<String> = Vec::new();
+        let mut files: Vec<FileInfo> = Vec::new();
+
+        for (id, ts, content, url, file_name, mime_type) in rows {
+            let key = (id, ts as u32, content);
+            match &current {
+                Some(c) if c != &key => {
+                    result.push(BulletinRow { id: c.0, ts: c.1, content: c.2.clone(), photos: std::mem::take(&mut photos), files: std::mem::take(&mut files) });
+                    current = Some(key);
+                }
+                None => { current = Some(key); }
+                _ => {}
+            }
+            if let Some(u) = url {
+                if u.starts_with("/file/") {
+                    files.push(FileInfo { url: u, file_name: file_name.unwrap_or_default(), mime_type: mime_type.unwrap_or_default() });
+                } else {
+                    photos.push(u);
+                }
+            }
+        }
+        if let Some(c) = current {
+            result.push(BulletinRow { id: c.0, ts: c.1, content: c.2, photos, files });
+        }
+
+        Ok(result)
     }
 
     async fn insert_photo(&self, bulletin_id: i32, url: &str, msg_id: i32) -> anyhow::Result<()> {
@@ -81,28 +106,6 @@ impl Storage for SqliteStorage {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    async fn get_photo_paths(&self, bulletin_id: i32) -> anyhow::Result<Vec<String>> {
-        let rows = sqlx::query_as::<_, (String,)>(
-            "SELECT url FROM attachments WHERE bulletin_id = ? AND url LIKE '/photo/%' ORDER BY msg_id"
-        )
-        .bind(bulletin_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|(u,)| u).collect())
-    }
-
-    async fn get_file_info(&self, bulletin_id: i32) -> anyhow::Result<Vec<FileInfo>> {
-        let rows = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT url, file_name, mime_type FROM attachments WHERE bulletin_id = ? AND file_name IS NOT NULL ORDER BY msg_id"
-        )
-        .bind(bulletin_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|(url, file_name, mime_type)| FileInfo { url, file_name, mime_type }).collect())
     }
 
     async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>> {

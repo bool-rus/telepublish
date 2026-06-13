@@ -9,6 +9,8 @@ pub struct BulletinRow {
     pub id: i32,
     pub ts: u32,
     pub content: String,
+    pub photos: Vec<String>,
+    pub files: Vec<FileInfo>,
 }
 
 pub struct FileInfo {
@@ -25,8 +27,6 @@ pub trait Storage: Send + Sync {
     async fn get_bulletins(&self, offset: u32) -> anyhow::Result<Vec<BulletinRow>>;
     async fn insert_photo(&self, bulletin_id: i32, url: &str, msg_id: i32) -> anyhow::Result<()>;
     async fn insert_file(&self, bulletin_id: i32, url: &str, msg_id: i32, file_name: &str, mime_type: &str) -> anyhow::Result<()>;
-    async fn get_photo_paths(&self, bulletin_id: i32) -> anyhow::Result<Vec<String>>;
-    async fn get_file_info(&self, bulletin_id: i32) -> anyhow::Result<Vec<FileInfo>>;
     async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>>;
     async fn delete_attachments_for_bulletin(&self, bulletin_id: i32) -> anyhow::Result<()>;
 }
@@ -95,17 +95,44 @@ impl Storage for YdbStorage {
 
     async fn get_bulletins(&self, offset: u32) -> anyhow::Result<Vec<BulletinRow>> {
         let mut conn = self.conn.lock().await;
-        let rows = query_as::<_, (i32, Datetime, String)>("
+        let rows = query_as::<_, (i32, Datetime, String, Option<String>, Option<String>, Option<String>)>("
             declare $offset as Uint32;
-            select id, ts, content from bulletins order by ts desc limit 10 offset $offset;
+            select b.id, b.ts, b.content, a.url, a.file_name, a.mime_type
+            from bulletins b
+            left join attachments a on b.id = a.bulletin_id
+            order by b.ts desc, a.msg_id asc
+            limit 10 offset $offset;
         ").bind(("$offset", offset))
             .fetch_all(executor!(&mut conn)).await?;
 
-        Ok(rows.into_iter().map(|(id, ts, content)| BulletinRow {
-            id,
-            ts: into_ts(ts),
-            content,
-        }).collect())
+        let mut result: Vec<BulletinRow> = Vec::new();
+        let mut current: Option<(i32, u32, String)> = None;
+        let mut photos: Vec<String> = Vec::new();
+        let mut files: Vec<FileInfo> = Vec::new();
+
+        for (id, ts, content, url, file_name, mime_type) in rows {
+            let key = (id, into_ts(ts), content);
+            match &current {
+                Some(c) if c != &key => {
+                    result.push(BulletinRow { id: c.0, ts: c.1, content: c.2.clone(), photos: std::mem::take(&mut photos), files: std::mem::take(&mut files) });
+                    current = Some(key);
+                }
+                None => { current = Some(key); }
+                _ => {}
+            }
+            if let Some(u) = url {
+                if u.starts_with("/file/") {
+                    files.push(FileInfo { url: u, file_name: file_name.unwrap_or_default(), mime_type: mime_type.unwrap_or_default() });
+                } else {
+                    photos.push(u);
+                }
+            }
+        }
+        if let Some(c) = current {
+            result.push(BulletinRow { id: c.0, ts: c.1, content: c.2, photos, files });
+        }
+
+        Ok(result)
     }
 
     async fn insert_photo(&self, bulletin_id: i32, url: &str, msg_id: i32) -> anyhow::Result<()> {
@@ -132,28 +159,6 @@ impl Storage for YdbStorage {
                     .bind(("$mime", mime_type.to_owned()))
             ).await?;
         Ok(())
-    }
-
-    async fn get_photo_paths(&self, bulletin_id: i32) -> anyhow::Result<Vec<String>> {
-        let mut conn = self.conn.lock().await;
-        let rows = query_as::<_, (String,)>("
-            declare $bid as Int32;
-            select url from attachments where bulletin_id = $bid and url like '/photo/%' order by msg_id;
-        ").bind(("$bid", bulletin_id))
-            .fetch_all(executor!(&mut conn)).await?;
-
-        Ok(rows.into_iter().map(|(u,)| u).collect())
-    }
-
-    async fn get_file_info(&self, bulletin_id: i32) -> anyhow::Result<Vec<FileInfo>> {
-        let mut conn = self.conn.lock().await;
-        let rows = query_as::<_, (String, String, String)>("
-            declare $bid as Int32;
-            select url, file_name, mime_type from attachments where bulletin_id = $bid and file_name is not null order by msg_id;
-        ").bind(("$bid", bulletin_id))
-            .fetch_all(executor!(&mut conn)).await?;
-
-        Ok(rows.into_iter().map(|(url, file_name, mime_type)| FileInfo { url, file_name, mime_type }).collect())
     }
 
     async fn get_attachment_keys(&self, bulletin_id: i32) -> anyhow::Result<Vec<(i32, i32, Option<String>)>> {

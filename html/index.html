@@ -123,7 +123,7 @@ async function loadMore() {
   loading = true;
 
   try {
-    const res = await fetch('/bulletins?offset=' + offset);
+    const res = await fetch('/api/bulletins?offset=' + offset);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
 
@@ -160,7 +160,7 @@ async function loadMore() {
         files.className = 'card-files';
         for (const f of b.files) {
           const a = document.createElement('a');
-          a.href = f.url;
+          a.href = '/api' + f.url;
           a.className = 'file-link';
           a.textContent = '\u{1F4C4} ' + f.name;
           a.target = '_blank';
@@ -174,10 +174,10 @@ async function loadMore() {
         photos.className = 'card-photos';
         for (const p of b.photos) {
           const img = document.createElement('img');
-          img.src = p;
+          img.src = '/api' + p;
           img.alt = '';
           img.loading = 'lazy';
-          img.onclick = (e) => { e.stopPropagation(); openLightbox(p); };
+          img.onclick = (e) => { e.stopPropagation(); openLightbox('/api' + p); };
           photos.appendChild(img);
         }
         card.appendChild(photos);

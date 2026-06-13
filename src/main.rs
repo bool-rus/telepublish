@@ -212,7 +212,7 @@ async fn process_update(
         let s3_key = format!("bulletins/{}/{}_{}.{}", chat_id, file_target, msg_id, ext);
         s3_client.objects().put(&conf.s3_bucket, &s3_key).body_bytes(bytes.to_vec()).content_type(&mime).send().await?;
 
-        let path = format!("/file/{}/{}", file_target, msg_id);
+        let path = format!("/file/{}/{}.{}", file_target, msg_id, ext);
         storage.insert_file(file_target, &path, msg_id, file_name, &mime).await?;
     } else if !content.is_empty() {
         storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
@@ -283,7 +283,7 @@ async fn create_server(state: AppState) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/bulletins", axum::routing::get(get_bulletins))
         .route("/photo/:bulletin_id/:msg_id", axum::routing::get(get_photo))
-        .route("/file/:bulletin_id/:msg_id", axum::routing::get(get_file))
+        .route("/file/:bulletin_id/:key", axum::routing::get(get_file))
         .with_state(state);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -298,13 +298,10 @@ async fn get_bulletins(State(app): State<AppState>, axum::extract::Query(params)
     let offset = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0u32);
     let rows = app.storage.get_bulletins(offset).await.map_err(ae)?;
 
-    let mut bulletins: Vec<Bulletin> = Vec::new();
-    for row in rows {
-        let photos = app.storage.get_photo_paths(row.id).await.map_err(ae)?;
-        let files = app.storage.get_file_info(row.id).await.map_err(ae)?
-            .into_iter().map(|f| FileAttachment { url: f.url, name: f.file_name, mime: f.mime_type }).collect();
-        bulletins.push(Bulletin { ts: row.ts, text: row.content, photos, files });
-    }
+    let bulletins: Vec<Bulletin> = rows.into_iter().map(|row| {
+        let files = row.files.into_iter().map(|f| FileAttachment { url: f.url, name: f.file_name, mime: f.mime_type }).collect();
+        Bulletin { ts: row.ts, text: row.content, photos: row.photos, files }
+    }).collect();
 
     Ok(Json(Data { bulletins }))
 }
@@ -330,14 +327,10 @@ async fn get_photo(
 
 async fn get_file(
     State(app): State<AppState>,
-    Path((id, msg_id)): Path<(i32, i32)>,
+    Path((id, key)): Path<(i32, String)>,
 ) -> Result<Response, AppError> {
-    let info = app.storage.get_file_info(id).await.map_err(ae)?;
-    let file_info = info.iter().find(|f| f.url == format!("/file/{}/{}", id, msg_id))
-        .ok_or_else(|| ae(anyhow::anyhow!("file not found")))?;
-
-    let file_name = FilePath::new(&file_info.file_name);
-    let ext = file_name.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+    let (msg_id_str, ext) = key.split_once('.').unwrap_or((&key, "bin"));
+    let msg_id: i32 = msg_id_str.parse()?;
     let s3_key = format!("bulletins/{}/{}_{}.{}", app.conf.channel, id, msg_id, ext);
 
     let obj = app.s3_client.objects().get(&app.conf.s3_bucket, &s3_key).send().await?;
@@ -349,8 +342,8 @@ async fn get_file(
 
     let response = Response::builder()
         .header("Cache-Control", "public, max-age=86400")
-        .header("Content-Type", &file_info.mime_type)
-        .header("Content-Disposition", format!("inline; filename=\"{}\"", file_info.file_name))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Disposition", format!("inline; filename=\"{}.{}\"", msg_id, ext))
         .body(axum::body::Body::from(buf))
         .unwrap();
     Ok(response)
