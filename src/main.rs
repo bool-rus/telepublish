@@ -122,38 +122,38 @@ fn write_tag_open(result: &mut String, kind: &MessageEntityKind, entity_text: &s
         MessageEntityKind::TextLink { url } => {
             result.push_str("<a href=\"");
             result.push_str(&html_escape(url.as_str()));
-            result.push_str("\" rel=\"nofollow\">");
+            result.push_str("\" target=\"_blank\" rel=\"nofollow\">");
         }
         MessageEntityKind::Url => {
             result.push_str("<a href=\"");
             result.push_str(&html_escape(entity_text));
-            result.push_str("\" rel=\"nofollow\">");
+            result.push_str("\" target=\"_blank\" rel=\"nofollow\">");
         }
         MessageEntityKind::Email => {
             result.push_str("<a href=\"mailto:");
             result.push_str(&html_escape(entity_text));
-            result.push_str("\" rel=\"nofollow\">");
+            result.push_str("\" target=\"_blank\" rel=\"nofollow\">");
         }
         MessageEntityKind::PhoneNumber => {
             result.push_str("<a href=\"tel:");
             result.push_str(&html_escape(entity_text));
-            result.push_str("\" rel=\"nofollow\">");
+            result.push_str("\" target=\"_blank\" rel=\"nofollow\">");
         }
         MessageEntityKind::Mention => {
             result.push_str("<a href=\"https://t.me/");
             result.push_str(&html_escape(&entity_text[1..]));
-            result.push_str("\" rel=\"nofollow\">");
+            result.push_str("\" target=\"_blank\" rel=\"nofollow\">");
         }
         MessageEntityKind::Hashtag => {
             result.push_str("<a href=\"https://t.me/");
             result.push_str(&html_escape(&entity_text[1..]));
-            result.push_str("\" rel=\"nofollow\">");
+            result.push_str("\" target=\"_blank\" rel=\"nofollow\">");
         }
         MessageEntityKind::TextMention { user } => {
             let url = user.preferably_tme_url();
             result.push_str("<a href=\"");
             result.push_str(&html_escape(url.as_str()));
-            result.push_str("\" rel=\"nofollow\">");
+            result.push_str("\" target=\"_blank\" rel=\"nofollow\">");
         }
         MessageEntityKind::BotCommand | MessageEntityKind::Cashtag | MessageEntityKind::CustomEmoji { .. } => {}
     }

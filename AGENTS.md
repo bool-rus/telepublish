@@ -8,7 +8,8 @@
 
 # In Progress
 
-- [ ] Message entities — HTML-форматирование текста в БД (bold, italic, links и т.д.)
+- [x] Message entities — HTML-форматирование текста в БД (bold, italic, links и т.д.)
+- [ ] Тесты форматирования (test_entities в tests/integration.rs)
 
 # Blocked
 

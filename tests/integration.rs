@@ -397,3 +397,197 @@ async fn all_scenarios() {
 
     del_and_wait(ids8[0], &t8).await;
 }
+
+// ---- entity helpers ----
+
+fn ent_bold(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"bold","offset":offset,"length":length})
+}
+fn ent_italic(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"italic","offset":offset,"length":length})
+}
+fn ent_underline(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"underline","offset":offset,"length":length})
+}
+fn ent_strikethrough(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"strikethrough","offset":offset,"length":length})
+}
+fn ent_code(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"code","offset":offset,"length":length})
+}
+fn ent_pre(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"pre","offset":offset,"length":length})
+}
+fn ent_link(offset: usize, length: usize, url: &str) -> serde_json::Value {
+    serde_json::json!({"type":"text_link","offset":offset,"length":length,"url":url})
+}
+fn ent_url(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"url","offset":offset,"length":length})
+}
+fn ent_mention(offset: usize, length: usize) -> serde_json::Value {
+    serde_json::json!({"type":"mention","offset":offset,"length":length})
+}
+
+async fn send_text_entities(text: &str, entities: &str) -> i64 {
+    tg_post("sendMessage", &[
+        ("chat_id", &channel().to_string()),
+        ("text", text),
+        ("entities", entities),
+    ]).await["result"]["message_id"].as_i64().unwrap()
+}
+
+async fn send_photo_caption_entities(caption: &str, entities: &str) -> i64 {
+    let data = tokio::fs::read("test_data/photo.jpg").await.unwrap();
+    let part = reqwest::multipart::Part::bytes(data).file_name("photo.jpg");
+    let form = reqwest::multipart::Form::new()
+        .text("chat_id", channel().to_string())
+        .text("caption", caption.to_string())
+        .text("caption_entities", entities.to_string())
+        .part("photo", part);
+    let r = tg_multipart("sendPhoto", form).await;
+    r["result"]["message_id"].as_i64().unwrap()
+}
+
+#[tokio::test]
+async fn test_entities() {
+    sleep(Duration::from_secs(3)).await;
+
+    // 1. Bold
+    let tok = format!("eb1-{}", unique());
+    let text = format!("X {tok} X");
+    let entities = serde_json::json!([ent_bold(2, tok.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    assert_eq!(b.text, format!("X <b>{tok}</b> X"));
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 2. Italic
+    let tok = format!("eb2-{}", unique());
+    let text = format!("X {tok} X");
+    let entities = serde_json::json!([ent_italic(2, tok.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    assert_eq!(b.text, format!("X <i>{tok}</i> X"));
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 3. Underline
+    let tok = format!("eb3-{}", unique());
+    let text = format!("X {tok} X");
+    let entities = serde_json::json!([ent_underline(2, tok.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    assert_eq!(b.text, format!("X <u>{tok}</u> X"));
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 4. Strikethrough
+    let tok = format!("eb4-{}", unique());
+    let text = format!("X {tok} X");
+    let entities = serde_json::json!([ent_strikethrough(2, tok.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    assert_eq!(b.text, format!("X <s>{tok}</s> X"));
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 5. Code
+    let tok = format!("eb5-{}", unique());
+    let text = format!("X {tok} X");
+    let entities = serde_json::json!([ent_code(2, tok.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    assert_eq!(b.text, format!("X <code>{tok}</code> X"));
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 6. Pre
+    let tok = format!("eb6-{}", unique());
+    let text = format!("X {tok} X");
+    let entities = serde_json::json!([ent_pre(2, tok.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    assert_eq!(b.text, format!("X <pre>{tok}</pre> X"));
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 7. TextLink
+    let tok = format!("eb7-{}", unique());
+    let text = format!("X {tok} X");
+    let entities = serde_json::json!([ent_link(2, tok.len(), &format!("https://example.com/{tok}"))]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    let expected = format!("X <a href=\"https://example.com/{tok}\" target=\"_blank\" rel=\"nofollow\">{tok}</a> X");
+    assert_eq!(b.text, expected);
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 8. Url (bare URL)
+    let tok = format!("eb8-{}", unique());
+    let url = format!("https://{tok}.com/x");
+    let text = format!("X {url} X");
+    let entities = serde_json::json!([ent_url(2, url.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    let expected = format!("<a href=\"{url}\" target=\"_blank\" rel=\"nofollow\">{url}</a>");
+    assert!(b.text.contains(&expected), "expected '{expected}' in '{}'", b.text);
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 9. Mention
+    let tok = format!("eb9-{}", unique());
+    let mention = "@TestUsername123";
+    let text = format!("{tok} {mention}");
+    let entities = serde_json::json!([ent_mention(tok.len() + 1, mention.len())]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    let expected = format!("<a href=\"https://t.me/TestUsername123\" target=\"_blank\" rel=\"nofollow\">{mention}</a>");
+    assert!(b.text.contains(&expected), "expected '{expected}' in '{}'", b.text);
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 10. Nested bold + italic
+    let text = "bold Itali bold";
+    let entities = serde_json::json!([ent_bold(0, 15), ent_italic(5, 5)]).to_string();
+    let id = send_text_entities(text, &entities).await;
+    let b = wait_text("Itali").await;
+    assert_eq!(b.text, "<b>bold <i>Itali</i> bold</b>");
+    del_and_wait(id, "Itali").await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 11. Multiple entities
+    let tok = format!("eb11-{}", unique());
+    let text = format!("{tok} A B C");
+    let entities = serde_json::json!([
+        ent_bold(tok.len() + 1, 1),
+        ent_italic(tok.len() + 3, 1),
+        ent_underline(tok.len() + 5, 1),
+    ]).to_string();
+    let id = send_text_entities(&text, &entities).await;
+    let b = wait_text(&tok).await;
+    let expected = format!("{tok} <b>A</b> <i>B</i> <u>C</u>");
+    assert_eq!(b.text, expected);
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 12. HTML escape (no entities)
+    let tok = format!("eb12-{}", unique());
+    let text = format!("{tok} & <x> \"quoted\"");
+    let id = send_text(&text).await;
+    let b = wait_text(&tok).await;
+    let expected = format!("{tok} &amp; &lt;x&gt; &quot;quoted&quot;");
+    assert_eq!(b.text, expected);
+    del_and_wait(id, &tok).await;
+    sleep(Duration::from_secs(2)).await;
+
+    // 13. Bold in photo caption
+    let tok = format!("eb13-{}", unique());
+    let caption = format!("{tok} B");
+    let entities = serde_json::json!([ent_bold(tok.len() + 1, 1)]).to_string();
+    let id = send_photo_caption_entities(&caption, &entities).await;
+    let b = wait_b(&tok).await;
+    assert_eq!(b.text, format!("{tok} <b>B</b>"));
+    assert!(b.photos[0].starts_with("/photo/"), "expected photo");
+    del_and_wait(id, &tok).await;
+}
