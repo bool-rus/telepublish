@@ -151,7 +151,7 @@ async function loadMore() {
       if (b.text) {
         const text = document.createElement('div');
         text.className = 'card-text';
-        text.textContent = b.text;
+        text.innerHTML = b.text;
         card.appendChild(text);
       }
 

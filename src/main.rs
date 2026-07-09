@@ -22,6 +22,7 @@ use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboar
 use teloxide::{dptree, Bot};
 use tokio::sync::Mutex;
 
+mod html;
 mod storage;
 mod sqlite_storage;
 use storage::Storage;
@@ -164,11 +165,14 @@ async fn process_update(
         return Ok(());
     }
 
-    let content = text.unwrap_or("");
+    let entities = msg.parse_entities()
+        .or_else(|| msg.parse_caption_entities())
+        .unwrap_or_default();
+    let content = html::entities_to_html(text.unwrap_or(""), &entities);
 
     if let Some(photos) = msg.photo() {
         if !content.is_empty() {
-            storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
+            storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, &content).await?;
         }
 
         let msg_id = msg.id.0;
@@ -196,7 +200,7 @@ async fn process_update(
         };
 
         if reply_target.is_none() && !content.is_empty() {
-            storage.upsert_bulletin(file_target, msg.date.timestamp() as u32, content).await?;
+            storage.upsert_bulletin(file_target, msg.date.timestamp() as u32, &content).await?;
         }
 
         let msg_id = msg.id.0;
@@ -215,7 +219,7 @@ async fn process_update(
         let path = format!("/file/{}/{}.{}", file_target, msg_id, ext);
         storage.insert_file(file_target, &path, msg_id, file_name, &mime).await?;
     } else if !content.is_empty() {
-        storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, content).await?;
+        storage.upsert_bulletin(target_id, msg.date.timestamp() as u32, &content).await?;
     }
 
     Ok(())
