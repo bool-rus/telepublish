@@ -98,10 +98,9 @@ impl Storage for YdbStorage {
         let rows = query_as::<_, (i32, Datetime, String, Option<String>, Option<String>, Option<String>)>("
             declare $offset as Uint32;
             select b.id, b.ts, b.content, a.url, a.file_name, a.mime_type
-            from bulletins b
-            left join attachments a on b.id = a.bulletin_id
-            order by b.ts desc, a.msg_id asc
-            limit 10 offset $offset;
+            from (select id, ts, content from bulletins order by ts desc limit 10 offset $offset) as b
+            left join attachments as a on b.id = a.bulletin_id
+            order by b.ts desc, a.msg_id asc;
         ").bind(("$offset", offset))
             .fetch_all(executor!(&mut conn)).await?;
 

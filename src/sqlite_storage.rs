@@ -45,8 +45,9 @@ impl Storage for SqliteStorage {
     async fn get_bulletins(&self, offset: u32) -> anyhow::Result<Vec<BulletinRow>> {
         let rows = sqlx::query_as::<_, (i32, i64, String, Option<String>, Option<String>, Option<String>)>(
             "SELECT b.id, b.ts, b.content, a.url, a.file_name, a.mime_type
-             FROM bulletins b LEFT JOIN attachments a ON b.id = a.bulletin_id
-             ORDER BY b.ts DESC, a.msg_id ASC LIMIT 10 OFFSET ?"
+             FROM (SELECT id, ts, content FROM bulletins ORDER BY ts DESC LIMIT 10 OFFSET ?) b
+             LEFT JOIN attachments a ON b.id = a.bulletin_id
+             ORDER BY b.ts DESC, a.msg_id ASC"
         )
         .bind(offset as i64)
         .fetch_all(&self.pool)
@@ -125,5 +126,73 @@ impl Storage for SqliteStorage {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp_db() -> std::path::PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("telepublish_test_{}_{}.db", std::process::id(), n))
+    }
+
+    async fn storage(tmp: &std::path::Path) -> SqliteStorage {
+        let s = SqliteStorage::new(&format!("sqlite://{}?mode=rwc", tmp.display())).await.unwrap();
+        s.migrate().await.unwrap();
+        s
+    }
+
+    fn cleanup(tmp: &std::path::Path) {
+        for p in [
+            tmp.to_path_buf(),
+            tmp.with_extension("db-wal"),
+            tmp.with_extension("db-shm"),
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[tokio::test]
+    async fn pagination_with_albums() {
+        let tmp = tmp_db();
+        let s = storage(&tmp).await;
+
+        // newest bulletin id=15 has an album with 5 photos,
+        // the rest (1..=14) are text-only, ts == id
+        for id in 1..=15 {
+            s.upsert_bulletin(id, id as u32, &format!("text {}", id)).await.unwrap();
+        }
+        for msg in 1..=5 {
+            s.insert_photo(15, &format!("/photo/15/{}", msg), msg).await.unwrap();
+        }
+
+        let page1 = s.get_bulletins(0).await.unwrap();
+        assert_eq!(page1.len(), 10, "page 1 must contain exactly 10 bulletins");
+        assert_eq!(
+            page1.iter().map(|b| b.id).collect::<Vec<_>>(),
+            vec![15, 14, 13, 12, 11, 10, 9, 8, 7, 6]
+        );
+        assert_eq!(page1[0].photos.len(), 5, "album must carry all 5 photos");
+
+        let page2 = s.get_bulletins(10).await.unwrap();
+        assert_eq!(page2.len(), 5, "page 2 must contain the remaining 5 bulletins");
+        assert_eq!(page2.iter().map(|b| b.id).collect::<Vec<_>>(), vec![5, 4, 3, 2, 1]);
+
+        let page3 = s.get_bulletins(15).await.unwrap();
+        assert!(page3.is_empty(), "offset beyond the end must be empty");
+
+        let mut seen = std::collections::HashSet::new();
+        for b in page1.iter().chain(page2.iter()) {
+            assert!(seen.insert(b.id), "duplicate bulletin id={} in pagination", b.id);
+        }
+        assert_eq!(seen.len(), 15);
+
+        drop(s);
+        cleanup(&tmp);
     }
 }
